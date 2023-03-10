@@ -1,0 +1,939 @@
+diff -ru cscope-15.9/contrib/xcscope/cscope-indexer cscope-15.9.plug/contrib/xcscope/cscope-indexer
+--- cscope-15.9/contrib/xcscope/cscope-indexer	2017-11-06 16:14:58.000000000 -0800
++++ cscope-15.9.plug/contrib/xcscope/cscope-indexer	2022-11-17 05:42:03.515366669 -0800
+@@ -56,15 +56,30 @@
+ #          Suppress the generation/updating of the cscope database
+ #          file.  Only a list of files is generated.
+ #
++#     -q
++#          Quiet mode (don't show any messages except for error/warnings)
+ #     -r
+ #          Recurse into subdirectories to locate files to index.
+ #          Without this option, only the current directory is
+ #          searched.
+ #
++#     -t
++#          Include indexing of TACC files.
++#
++#     -T
++#          TACC files only.
++#
++#     -I
++#          Update database incrementally.
++#
++#     -n
++#          Debug mode; don't run command, simply show them.
++#
+ #     -v
+ #          Be verbose.  Output simple progress messages.
+ #
+ #
++#
+ ###############################################################################
+ set -e
+ 
+@@ -77,7 +92,13 @@
+ LIST_FILE='cscope.files'
+ DATABASE_FILE='cscope.out'
+ RECURSE=
++TACC=
++TACC_ONLY=
+ VERBOSE=
++QUIET=
++INCR_UPDATE=
++ECHO=
++SUMM_FILE=taccscope.summary
+ export DIR RECURSE			# Need to pass these to subprocesses
+ 
+ while [ -n "$1" ]
+@@ -104,12 +125,28 @@
+     -l)
+ 	LIST_ONLY=1
+ 	;;
++    -q)
++	QUIET=1
++	;;
+     -r)
+ 	RECURSE=1
+ 	;;
++    -t)
++	TACC=1
++	;;
++    -I)
++        INCR_UPDATE=1
++	;;
++    -T)
++	TACC=1
++	TACC_ONLY=1
++	;;
+     -v)
+ 	VERBOSE=1
+ 	;;
++    -n)
++	ECHO=echo
++	;;
+     *)
+ 	DIR="$1"
+ 	;;
+@@ -119,11 +156,30 @@
+ 
+ cd $DIR
+ 
++PROG_BAR_FLAG=-G
++if [ "X$QUIET" != "X" ]
++then
++    PROG_BAR_FLAG=
++    VERBOSE=
++fi
++
+ if [ "X$VERBOSE" != "X" ]
+ then
+     echo "Creating list of files to index ..."
+ fi
+ 
++if [ "X$TACC_ONLY" != "X" ]
++then
++    FTYPES='\.tac$'
++else
++    if [ "X$TACC" = "X" ]
++    then
++        FTYPES='\.([chly](xx|pp)*|cc|hh|tin|itin|C)$'
++    else
++        FTYPES='\.([chly](xx|pp)*|cc|hh|tin|itin|C|tac)$'
++    fi
++fi
++
+ (
+     if [ "X$RECURSE" = "X" ]
+     then
+@@ -133,10 +189,10 @@
+ 	    echo "$DIR/$f"
+ 	done
+     else
+-	find $DIR \( -type f -o -type l \)
++	find $DIR \( -type f \)
+     fi
+ ) | \
+-    egrep -i '\.([chly](xx|pp)*|cc|hh)$' | \
++    egrep -i $FTYPES | \
+     sed -e '/\/CVS\//d' -e '/\/RCS\//d' -e 's/^\.\///' | \
+     sort | \
+     sed -e '/[ \t]/s/^.*$/\"&\"/' > $LIST_FILE
+@@ -151,16 +207,57 @@
+     exit 0
+ fi
+ 
++if [ "X$TACC" != "X" ]
++then
++    TACCSCOPE_FLAGS=
++    if [ "X$INCR_UPDATE" != "X" ]
++    then
++        TACCSCOPE_FLAGS="$TACCSCOPE_FLAGS --incremental-update"
++    fi
++    if [ "X$VERBOSE" != "X" ]
++    then
++        echo "Scanning TACC files ..."
++        TACCSCOPE_FLAGS="$TACCSCOPE_FLAGS --verbose"
++    else
++        if [ "X$QUIET" != "X" ]
++        then
++            TACCSCOPE_FLAGS="$TACCSCOPE_FLAGS --quiet"
++        fi
++    fi
++    $ECHO mv $LIST_FILE $LIST_FILE.or
++    $ECHO taccscope --filter-file-list $LIST_FILE.or > $LIST_FILE
++    $ECHO taccscope --cache-mode $TACCSCOPE_FLAGS --file-list $LIST_FILE --summary-file $SUMM_FILE
++    if [ "X$VERBOSE" != "X" ]
++    then
++        echo "Scanning TACC files ... done"
++    fi
++fi
++
++if [ "X$INCR_UPDATE" = "X" ]
++then
++    UNCONDITIONAL_FLAG=-u
++fi
++
+ if [ "X$VERBOSE" != "X" ]
+ then
+     echo "Indexing files ..."
+ fi
+ 
+-cscope -b -i $LIST_FILE -f $DATABASE_FILE
++$ECHO cscope -b -i $LIST_FILE -f $DATABASE_FILE $UNCONDITIONAL_FLAG -q $PROG_BAR_FLAG
+ 
+ if [ "X$VERBOSE" != "X" ]
+ then
+     echo "Indexing files ... done"
+ fi
+ 
++if [ "X$QUIET" = "X" ]
++then
++    echo "Summary:"
++    echo "  Number of files processed:" `cat $LIST_FILE | wc -l`
++    if [ "X$TACC" != "X" ]
++    then
++        cat $SUMM_FILE
++    fi
++fi
++
+ exit 0
+diff -ru cscope-15.9/contrib/xcscope/xcscope.el cscope-15.9.plug/contrib/xcscope/xcscope.el
+--- cscope-15.9/contrib/xcscope/xcscope.el	2014-06-27 23:44:48.697978668 -0700
++++ cscope-15.9.plug/contrib/xcscope/xcscope.el	2014-06-27 23:44:48.725978079 -0700
+@@ -355,6 +355,9 @@
+ ;;      list of files to index, or when creating the list of files and
+ ;;      the corresponding cscope database.
+ ;;
++;; "cscope-index-tacc-files"
++;;      If non-nil, includes indexing of tacc files.
++;;
+ ;; "cscope-name-line-width"
+ ;;      The width of the combined "function name:line number" field in
+ ;;      the cscope results buffer.  If negative, the field is
+@@ -776,6 +779,12 @@
+   :group 'cscope)
+ 
+ 
++(defcustom cscope-index-tacc-files t
++  "*If non-nil, includes indexing of tacc files."
++  :type 'boolean
++  :group 'cscope)
++
++
+ (defcustom cscope-no-mouse-prompts nil
+   "*If non-nil, use the symbol under the cursor instead of prompting.
+ Do not prompt for a value, except for when seaching for a egrep pattern
+@@ -1223,6 +1244,10 @@
+ 			(setq cscope-index-recursively
+ 			      (not cscope-index-recursively))
+ 			:style toggle :selected cscope-index-recursively ]
++		      [ "Index TACC files"
++			(setq cscope-index-tacc-files
++			      (not cscope-index-tacc-files))
++			:style toggle :selected cscope-index-tacc-files ]
+ 		      [ "Suppress empty matches"
+ 			(setq cscope-suppress-empty-matches
+ 			      (not cscope-suppress-empty-matches))
+@@ -2133,6 +2177,8 @@
+ 				   "." top-directory))))
+       (if cscope-index-recursively
+ 	  (setq args (cons "-r" args)))
++      (if cscope-index-tacc-files
++	  (setq args (cons "-t" args)))
+       (setq cscope-unix-index-process
+ 	    (apply 'start-process "cscope-indexer"
+ 		   cscope-unix-index-process-buffer
+diff -ru cscope-15.9/src/crossref.c cscope-15.9.plug/src/crossref.c
+--- cscope-15.9/src/crossref.c	2014-06-27 23:44:48.701978585 -0700
++++ cscope-15.9.plug/src/crossref.c	2014-06-27 23:44:48.729977995 -0700
+@@ -41,6 +41,7 @@
+ #include "build.h"
+ #include "scanner.h"
+ #include "alloc.h"
++#include "plugins.h"
+ 
+ #include <stdlib.h>
+ #include <sys/stat.h>
+@@ -97,6 +98,11 @@
+     int token;                  /* current token */
+     struct stat st;
+ 
++    /* if src file handled by a plugin, nothing else to do here */
++    if (cscp_handle_srcfile(srcfile)) {
++       return;
++    }
++
+     if (! ((stat(srcfile, &st) == 0)
+ 	   && S_ISREG(st.st_mode))) {
+ 	cannotopen(srcfile);
+diff -ru cscope-15.9/src/fscanner.l cscope-15.9.plug/src/fscanner.l
+--- cscope-15.9/src/fscanner.l	2014-06-27 23:44:48.701978585 -0700
++++ cscope-15.9.plug/src/fscanner.l	2014-06-27 23:44:48.729977995 -0700
+@@ -310,8 +310,6 @@
+ 			
+ 			my_yymore();
+ 			s = strpbrk(my_yytext, "\"<");
+-			if (!s)
+-				return(LEXERR);
+ 			my_yytext[my_yyleng-1] = '\0';
+ 			incfile(s + 1, s);
+ 			my_yytext[my_yyleng-1] = remember;
+@@ -372,8 +370,6 @@
+ 			/* NOTREACHED */
+ 		}
+ =		{	/* if a global definition initializer */
+-			if (!my_yytext)
+-				return(LEXERR);
+ 			if (global == YES && ppdefine == NO && my_yytext[0] != '#') {
+ 				initializerbraces = braces;
+ 				initializer = YES;
+@@ -382,8 +378,6 @@
+ 			/* NOTREACHED */
+ 		}
+ :		{	/* a if global structure field */
+-			if (!my_yytext)
+-				return(LEXERR);
+ 			if (global == YES && ppdefine == NO && my_yytext[0] != '#') {
+ 				structfield = YES;
+ 			}
+Only in cscope-15.9.plug/src: gen_csc_patch
+diff -ru cscope-15.9/src/main.c cscope-15.9.plug/src/main.c
+--- cscope-15.9/src/main.c	2014-06-27 23:44:48.717978251 -0700
++++ cscope-15.9.plug/src/main.c	2014-06-27 23:44:48.729977995 -0700
+@@ -44,6 +44,8 @@
+ #include "scanner.h" 
+ #include "alloc.h"
+ 
++#include "plugins.h"
++
+ #include <stdlib.h>	/* atoi */
+ #if defined(USE_NCURSES) && !defined(RENAMED_NCURSES)
+ #include <ncurses.h>
+@@ -153,7 +155,7 @@
+ 	
+ 
+ 	while ((opt = getopt_long(argcc, argv,
+-	       "GhVbcCdeF:f:I:i:kLl0:1:2:3:4:5:6:7:8:9:P:p:qRs:TUuvX",
++	       "gGhVbcCdeF:f:I:i:kLl0:1:2:3:4:5:6:7:8:9:P:p:qRs:TUuvX",
+ 	       lopts, &longind)) != -1) {
+ 		switch(opt) {
+ 
+@@ -203,6 +205,14 @@
+ 		case 'G':
+ 		        showprogressbar = YES;
+ 			break;
++		case 'g':
++			{
++			    int ret = cscp_parse_args(optarg);
++			    if (ret) {
++				myexit(ret);
++			    }
++			}
++			break;
+ 		case 'h':
+ 			longusage();
+ 			myexit(1);
+@@ -310,6 +325,8 @@
+     /* save the command name for messages */
+     argv0 = argv[0];
+ 
++    cscp_init();
++
+     /* set the options */
+ #ifdef HAVE_GETOPT_LONG 
+ 	argv = parse_options(&argc, argv);
+@@ -417,6 +429,7 @@
+ 	    case 'P':	/* prepend path to file names */
+ 	    case 's':	/* additional source file directory */
+ 	    case 'S':
++	    case 'g':	/* cscope plugins */
+ 		c = *s;
+ 		if (*++s == '\0' && --argc > 0) {
+ 		    s = *++argv;
+@@ -473,6 +486,14 @@
+ 		case 'S':
+ 		    sourcedir(s);
+ 		    break;
++		case 'g':
++                   {
++		     int ret = cscp_parse_args(s);
++                    if (ret) {
++                       exit(ret);
++                    }
++                   }
++		    break;
+ 		}
+ 		goto nextarg;
+ 	    default:
+diff -ru cscope-15.9/src/Makefile.am cscope-15.9.plug/src/Makefile.am
+--- cscope-15.9/src/Makefile.am	2014-06-27 23:44:48.717978251 -0700
++++ cscope-15.9.plug/src/Makefile.am	2014-06-27 23:44:48.729977995 -0700
+@@ -29,6 +29,8 @@
+ version.h vp.h vpaccess.c vpfopen.c vpinit.c vpopen.c
+ cscope_SOURCES += prog_bar.c
+ cscope_SOURCES += prog_bar.h
++cscope_SOURCES += plugins.c
++cscope_SOURCES += plugins.h
+ 
+ EXTRA_cscope_SOURCES = scanner.l fscanner.l
+ 
+Only in cscope-15.9.plug/src: plugins.c
+Only in cscope-15.9.plug/src: plugins.h
+--- /dev/null	2014-05-23 05:20:49.797625918 -0700
++++ cscope-15.9.plug/src/plugins.c	2014-06-27 23:44:48.729977995 -0700
+@@ -0,0 +1,515 @@
++/*===========================================================================
++ Copyright (c) 1998-2000, The Santa Cruz Operation 
++ All rights reserved.
++ 
++ Redistribution and use in source and binary forms, with or without
++ modification, are permitted provided that the following conditions are met:
++
++ *Redistributions of source code must retain the above copyright notice,
++ this list of conditions and the following disclaimer.
++
++ *Redistributions in binary form must reproduce the above copyright notice,
++ this list of conditions and the following disclaimer in the documentation
++ and/or other materials provided with the distribution.
++
++ *Neither name of The Santa Cruz Operation nor the names of its contributors
++ may be used to endorse or promote products derived from this software
++ without specific prior written permission. 
++
++ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS
++ IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE
++ LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ INTERRUPTION)
++ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
++ DAMAGE. 
++ =========================================================================*/
++
++
++/* plugin - support for cscope plugins */
++
++#include <stdio.h>
++#include <string.h>
++#include <errno.h>
++
++#include "global.h"
++#include "plugins.h"
++#include "build.h"
++
++#define OPENFLAG_READ	0
++
++static char const rcsid[] = "$Id$";
++
++/*
++ * cscope cache defs
++ */
++#define CSCP_CACHE_DIR_NAME     ".cscope.cache" 
++#define CSCP_CACHE_FAKE_ROOT    "@@_ROOT_@@" 
++#define CSCP_CACHE_FTYPE        ".csc"
++
++/*
++ * use hardcoded dimensions
++ */
++#define CSCP_MAXPATH            4096    /* XXX  use max path from the system */
++#define CSCP_FTYPE_MAX_LEN      128
++#define CSCP_CMD_MAX_LEN        (CSCP_MAXPATH + 4096)
++#define CSCP_PLUGINS_MAX        16
++
++#define CSCP_TACCSCOPE_CMD      "~/taccs/taccscope -C"
++
++typedef struct cscp_plugin_ {
++   char ftype[CSCP_FTYPE_MAX_LEN];
++   char cmd[CSCP_CMD_MAX_LEN];
++} cscp_plugin_st;
++
++static int cscp_num_plugins = 0;
++static cscp_plugin_st cscp_plugins[CSCP_PLUGINS_MAX];
++
++/*----------------------------------------------------------------------
++ * plugin object
++ */
++int cscp_plugin_add(char *ftype, char *cmd)
++{
++   cscp_plugin_st *pgin;
++
++   if (cscp_num_plugins >= CSCP_PLUGINS_MAX) {
++      return E2BIG;
++   }
++
++   pgin = &cscp_plugins[cscp_num_plugins];
++
++   if ((strlen(ftype) >= sizeof(pgin->ftype)) ||
++       (strlen(cmd) >= sizeof(pgin->cmd))) {
++      return EINVAL;
++   }
++
++   pgin->ftype[0] = '\0';        /* just in case */
++   pgin->cmd[0] = '\0';
++   if (*ftype != '.') {
++      strcpy(pgin->ftype, ".");
++   }
++   strcat(pgin->ftype, ftype);
++   strcat(pgin->cmd, cmd);
++
++   cscp_num_plugins++;
++
++   return 0;
++}
++
++/*
++ * find command for a given filetype
++ *
++ * return: == NULL - not found
++ *         != NULL - ptr to command to handle this file type
++ */
++static cscp_plugin_st*
++cscp_plugin_find(char *ftype)
++{
++   cscp_plugin_st *pgin, *pgin_last;
++
++   /*
++    * do a brute force linear search (it should be enough for the requirements)
++    */
++   for (pgin = &cscp_plugins[0],
++           pgin_last = &cscp_plugins[cscp_num_plugins];
++        pgin < pgin_last;
++        pgin++) {
++      if (strcmp(ftype, pgin->ftype) == 0) {
++         return pgin;
++      }
++   }
++
++   return NULL;
++}
++
++static void
++cscp_plugin_show_all(void)
++{
++   cscp_plugin_st *pgin, *pgin_last;
++
++   if (cscp_num_plugins > 0) {
++      printf("Cscope plug-ins:\n");
++      for (pgin = &cscp_plugins[0],
++              pgin_last = &cscp_plugins[cscp_num_plugins];
++           pgin < pgin_last;
++           pgin++) {
++         printf( "  - File type: %s => Command: '%s'\n", pgin->ftype, pgin->cmd);
++      }
++   }
++}
++
++/*----------------------------------------------------------------------
++ * init functions
++ */
++void
++cscp_init(void)
++{
++   static int inited = 0;
++
++   if (inited) {
++      return;
++   }
++
++   inited = 1;
++
++   /* add pre-defined plug-ins */
++   (void)cscp_plugin_add(".tac", CSCP_TACCSCOPE_CMD);
++}
++
++/*----------------------------------------------------------------------
++ * arg parsing functions
++ */
++
++static int
++cscp_invalid_arg (char *pair, int err)
++{
++   /* XXX show error in stderr */
++   return err;
++}
++
++/*
++ * plugin args in the following format (represented in EBNF):
++ *
++ *  PLUGIN_ARGS = ( <FILE_TYPE> ':' <CMD> ) ( ';' <FILE_TYPE> ':' <COMMAND> ) *
++ *
++ * where:
++ *  FILE_TYPE:  file type (initial '.' is optional)
++ *  COMMAND:    command to handle this file type
++ *
++ * Examples:
++ * 
++ *    cscope -g tac:taccscope;py:pycscope
++ *    cscope -g .foo:foocscope
++ */
++int
++cscp_parse_args(char *args)
++{
++   char *sav_ptr;
++   static const char* sep = ";";
++   char *pair, *p;
++   int ret;
++   static int inited = 0;
++
++   cscp_init();
++
++   for (pair = strtok_r(args, sep, &sav_ptr);
++        pair;
++        pair = strtok_r(NULL, sep, &sav_ptr)) {
++
++      p = strchr(pair, ':');
++      if (!p) {
++         return cscp_invalid_arg(pair, EINVAL);
++         return EINVAL;
++      }
++
++      *p = '\0';
++      ret = cscp_plugin_add(pair, p + 1);
++      if (ret) {
++         *p = ':';
++         return cscp_invalid_arg(pair, ret);
++      }
++   }
++
++   cscp_plugin_show_all();
++
++   exit(0);
++}
++
++/*----------------------------------------------------------------------
++ * path splitting helper functions
++ */
++typedef struct cscp_fname_info_ {
++   char full_name[CSCP_MAXPATH];
++   char path[CSCP_MAXPATH];
++   char filename[CSCP_MAXPATH];
++   char base[CSCP_MAXPATH];
++   char ftype[CSCP_MAXPATH];
++} cscp_fname_info_st;
++
++/*
++ * have our own version of strlcpy/strncat() to avoid external dependencies
++ */
++static size_t cscp_strlcpy(char* dst, char* src, size_t n)
++{
++   strncpy(dst, src, n - 1);
++   dst[n - 1] = '\0';
++   return strlen(dst);  /* ugly, but it's ok for purposes here */
++}
++
++static void cscp_split_full_name(char* full_name, 
++                                 cscp_fname_info_st *fni)
++{
++   char *last_slash, *filename, *last_dot;
++
++   cscp_strlcpy(fni->full_name, full_name, sizeof(fni->full_name));
++   fni->path[0] = '\0';
++   fni->filename[0] = '\0';
++   fni->base[0] = '\0';
++   fni->ftype[0] = '\0';
++
++   last_slash = strrchr(fni->full_name, '/');
++   if (last_slash) {
++      *last_slash = '\0';
++      (void)cscp_strlcpy(fni->path, fni->full_name, sizeof(fni->path) - 1);
++      strcat(fni->path, "/");
++      *last_slash = '/';
++      filename = last_slash + 1;
++   } else {
++      // no slash, filename is the full name
++      filename = fni->full_name;
++   }
++
++   (void)cscp_strlcpy(fni->filename, filename, sizeof(fni->filename));
++
++   last_dot = strrchr(filename, '.');
++   if (last_dot) {
++      *last_dot = '\0';
++      (void)cscp_strlcpy(fni->base, filename, sizeof(fni->base));
++      *last_dot = '.';
++      (void)cscp_strlcpy(fni->ftype, last_dot, sizeof(fni->ftype));
++   } else {
++      // not dot, so no ftype
++      (void)cscp_strlcpy(fni->base, filename, sizeof(fni->base));
++   }
++}
++
++/*----------------------------------------------------------------------
++ * cache related functions
++ */
++
++static void
++cscp_build_cache_fname(char* cache_fname, 
++                       cscp_fname_info_st *fni)
++{
++   /* XXX for now, assume there's enough space to fit the whole path */
++   strcpy(cache_fname, CSCP_CACHE_DIR_NAME);
++
++   /* add fake root if needed */
++   if (fni->full_name[0] == '/') {
++      strcat(cache_fname, "/");
++      strcat(cache_fname, CSCP_CACHE_FAKE_ROOT);
++   }
++   strcat(cache_fname, "/");
++   strcat(cache_fname, fni->full_name);
++   strcat(cache_fname, CSCP_CACHE_FTYPE);
++}
++
++#if 0
++static BOOL
++cscp_invoke_cmd_if_not_in_cache(char *cache_fname)
++{
++   return YES;
++}
++
++static BOOL
++cscp_cache_needs_update(char *cache_fname, struct stat *srcfile_st)
++{
++   struct stat st;
++   char *p;
++
++   /* */
++   if (stat(srcfile, src_st) != 0) {
++      
++   }
++
++   /* check all files/dirs in the cache path */
++   p = cache_fname;
++   do {
++      p = strchr(p, '/');
++      if (p) {
++         *p = '\0';
++      }
++      if (stat(cache_name, &st) != 0) {
++         /* can't stat file/dir, assume cache needs update */
++         return YES;
++      }
++      if (p) {
++         *p = '/';
++         p++;
++      }
++   } while (p);
++}
++#endif
++
++/*----------------------------------------------------------------------
++ * source file handling functions
++ */
++
++static void
++cscp_put_dummy_file(char* srcfile)
++{
++   putfilename(srcfile);	/* output the file name */
++   dbputc('\n');
++   dbputc('\n');
++   dbputc('\t');
++}
++
++static void
++cscp_put_posting(char *s, int marker_type)
++{
++   char *cp = s;
++
++   /* skip initial blanks of a string */
++   while (*cp && *cp == ' ') {
++      cp++;
++   }
++
++   if (*cp) {
++      putposting(cp, marker_type);
++   }
++}
++
++/*
++ * return: 0 - file not handled by any plugin
++ */
++int
++cscp_handle_srcfile(char *srcfile)
++{
++   static cscp_fname_info_st fni;       /* let these as static for now */
++   static char cache_fname[CSCP_MAXPATH * 2];
++
++   cscp_plugin_st *pgin;
++   FILE *fp;
++   char *line = NULL;
++   size_t len, sz = 0;
++   char *cp;
++   int wrote_marker;
++   char *symbol;
++   int marker_type;
++
++   cscp_split_full_name(srcfile, &fni);
++
++   pgin = cscp_plugin_find(fni.ftype);
++   if (!pgin) {
++      /* doesn't need a plug in, nothing to be done here */
++      return 0;
++   }
++
++   /* src file of interest, check if it's in the cache */
++
++   cscp_build_cache_fname(cache_fname, &fni);
++
++#if 0
++   if (cscp_cache_needs_update(cache_fname, &fni) == YES) {
++      if (! cscp_invoke_cmd_if_not_in_cache(cache_name) ) {
++         cannotopen(srcfile);
++         errorsfound = YES;
++         return 0;
++      }
++   }
++#endif
++
++   /* try to open file in cache */
++
++   fp = fopen(cache_fname, "r" );
++   if (!fp) {
++      posterr("cscope: cache file for '%s' not found, file skipped", srcfile);
++      cscp_put_dummy_file(srcfile);
++      errorsfound = YES;
++      return 1;
++   }
++
++   putfilename(srcfile);	/* output the file name */
++   dbputc('\n');
++   dbputc('\n');
++
++   /*
++    * read all lines from cache and write them to the db
++    *
++    * this part is tricky because in compressed mode we can't compress the
++    * markers (i.e., "\t"<mrkr>), only the symbols
++    */
++   /*
++    * crossref format in cache (pseudo EBNF):
++    *
++    *   CROSS_REF:   LINENO ':' TOKEN ( ^A TOKEN )* NL
++    *
++    *   TOKEN:       TOKEN_TYPE TOKEN_STR
++    *
++    *   TOKEN_TYPE:  '_' MARKER_TYPE |
++    *                ' ' ID_FLAG
++    *
++    *   MARKER_TYPE: see class Cscope above for definitions
++    *
++    *   ID_FLAG:     ' ' | 'i'
++    *                (NOTE: if 'i', token is a searchable identifier)
++    */
++   while (getline(&line, &sz, fp) >= 0) {
++      char *p;
++      char *tok;
++      char *sav_ptr;
++      static char *sep = "\001";  /* Ctrl-A = token separator in cache entries */
++
++      len = strlen(line);
++      if (len > 0 && line[len - 1] == '\n') {
++         line[len - 1] = '\0';
++      }
++
++      p = strchr(line, ':');
++      if (!p) {
++         /* XXX should show warning here */
++         continue;
++      }
++      *p = '\0';
++
++      /* write: LINENO ' ' NL */
++      lineoffset = dboffset;
++      dbfputs(line);
++      dbputc(' ');
++      dbputc('\n');
++
++      for (tok = strtok_r(p + 1, sep, &sav_ptr);
++           tok;
++           tok = strtok_r(NULL, sep, &sav_ptr)) {
++
++         if (strlen(tok) < 2) {
++            /* XXX should show warning here */
++            continue;
++         }
++
++         switch (tok[0]) {
++          case '_':
++            dbputc('\t');
++            dbputc(tok[1]);
++            if (invertedindex == YES) {
++               cscp_put_posting(&tok[2], tok[1]);
++            }
++            writestring(&tok[2]);
++            break;
++
++          case ' ':
++            switch (tok[1]) {
++             case 'i':
++               if (invertedindex == YES) {
++                  cscp_put_posting(&tok[2], ' ');
++               }
++               break;
++             default:
++               /* XXX should show warning here? */
++               break;
++            }
++            writestring(&tok[2]);
++            break;
++
++          default:
++            /* XXX should show warning here? */
++            break;
++         }
++         dbputc('\n');
++      }
++      dbputc('\n');
++   }
++
++   free(line);
++   fclose(fp);
++
++   /* prepare for the next file (or end-of-files) */
++//   dbputc('\n');
++   dbputc('\t');
++   return 1;
++}
+--- /dev/null	2014-05-23 05:20:49.797625918 -0700
++++ cscope-15.9.plug/src/plugins.h	2014-06-27 23:44:48.729977995 -0700
+@@ -0,0 +1,56 @@
++/*===========================================================================
++ Copyright (c) 1998-2000, The Santa Cruz Operation 
++ All rights reserved.
++ 
++ Redistribution and use in source and binary forms, with or without
++ modification, are permitted provided that the following conditions are met:
++
++ *Redistributions of source code must retain the above copyright notice,
++ this list of conditions and the following disclaimer.
++
++ *Redistributions in binary form must reproduce the above copyright notice,
++ this list of conditions and the following disclaimer in the documentation
++ and/or other materials provided with the distribution.
++
++ *Neither name of The Santa Cruz Operation nor the names of its contributors
++ may be used to endorse or promote products derived from this software
++ without specific prior written permission. 
++
++ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS
++ IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE
++ LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ INTERRUPTION)
++ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
++ DAMAGE. 
++ =========================================================================*/
++
++/* $Id$ */
++
++#ifndef CSCOPE_PLUGINS_H
++#define CSCOPE_PLUGINS_H
++
++#define MAXPATH	200		/* max length for entire name */
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#else
++# define HAVE_FCNTL_H 1
++#endif
++#ifdef HAVE_FCNTL_H
++# include <fcntl.h>
++#endif
++
++#include <sys/types.h>
++#include <sys/stat.h>
++
++void cscp_init(void);
++int cscp_parse_args(char *args);
++int cscp_handle_srcfile(char *srcfile);
++
++#endif /* CSCOPE_PLUGINS_H */

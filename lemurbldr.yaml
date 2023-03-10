@@ -1,0 +1,17 @@
+---
+package:
+  - name: cscope
+    upstream:
+      - file:///cscope-15.9-12.el9.src.rpm
+    type: srpm
+    spec: cscope.spec
+    source:
+      - cscope-15.9-arista-plugins.patch
+      - cscope-15.9-arista-progressBar.patch 
+    target:
+      - name: x86_64
+        repo:
+          - name: os
+            baseurl: https://artifactory-mirrors-px.infra.corp.arista.io/artifactory/rockylinux-9/AppStream/x86_64/os/
+          - name: appstream
+            baseurl: https://artifactory-mirrors-px.infra.corp.arista.io/artifactory/rockylinux-9/BaseOS/x86_64/os/

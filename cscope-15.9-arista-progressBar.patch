@@ -1,0 +1,460 @@
+diff -ru cscope-15.9.orig/src/build.c cscope-15.9/src/build.c
+--- cscope-15.9/src/build.c.orig	2022-11-17 04:56:41.724345034 -0800
++++ cscope-15.9/src/build.c	2022-11-17 04:57:19.559554704 -0800
+@@ -46,6 +46,8 @@
+ #include "version.h"		/* for FILEVERSION */
+ #include "vp.h"
+ 
++#include "prog_bar.h"           /* progress bar */
++
+ #if defined(USE_NCURSES) && !defined(RENAMED_NCURSES)
+ #include <ncurses.h>
+ #else
+@@ -55,6 +57,7 @@
+ /* Exported variables: */
+ 
+ BOOL	buildonly = NO;		/* only build the database */
++BOOL	showprogressbar = NO;	/* show progress bar (only applic. to -b option) */
+ BOOL	unconditional = NO;	/* unconditionally build database */
+ BOOL	fileschanged;		/* assume some files changed */
+ 
+@@ -216,6 +219,7 @@
+     int     copied = 0;		/* copied crossref for these files */
+     unsigned long fileindex;		/* source file name index */
+     BOOL    interactive = YES;	/* output progress messages */
++    prog_bar_t *pb = NULL;
+ 
+     /* normalize the current directory relative to the home directory so
+        the cross-reference is not rebuilt when the user's login is moved */
+@@ -369,6 +373,12 @@
+     if (invertedindex == YES) {
+ 	srcoffset = mymalloc((nsrcfiles + 1u) * sizeof(*srcoffset));
+     }
++
++    /* create progress bar if asked to do so */
++    if (showprogressbar) {
++       pb = prog_bar_create(nsrcfiles, PROG_BAR_WIDTH, "Parsing C/C++ files: ");
++    }
++
+     for (;;) {
+ 	progress("Building symbol database", (long)built,
+ 		 (long)lastfile);
+@@ -387,6 +397,10 @@
+ 	    while (oldfile != NULL && strcmp(file, oldfile) > 0) {
+ 		oldfile = getoldfile();
+ 	    }
++            /* update progress bar */
++            if (pb) {
++               prog_bar_update(pb, fileindex, file, 1);
++            }
+ 	    /* if there isn't an old database or this is a new file */
+ 	    if (oldfile == NULL || strcmp(file, oldfile) < 0) {
+ 		crossref(file);
+@@ -419,6 +433,10 @@
+ 	if (lastfile == nsrcfiles) {
+ 	    break;
+ 	}
++        /* update new total on progress bar (if we have one) */
++        if (pb) {
++           prog_bar_set_total(pb, nsrcfiles);
++        }
+ 	firstfile = lastfile;
+ 	lastfile = nsrcfiles;
+ 	if (invertedindex == YES) {
+@@ -427,6 +445,11 @@
+ 	/* sort the included file names */
+ 	qsort(srcfiles + firstfile, lastfile - firstfile, sizeof(*srcfiles), compare);
+     }
++    if (pb) {
++       prog_bar_done(pb);
++       prog_bar_destroy(pb);
++       pb = NULL;
++    }
+     /* add a null file name to the trailing tab */
+     putfilename("");
+     dbputc('\n');
+@@ -455,6 +478,11 @@
+ 	fstat(fileno(postings), &statstruct);
+ 	fclose(postings);
+ 	snprintf(sortcommand, sizeof(sortcommand), "env LC_ALL=C sort -T %s %s", tmpdir, temp1);
++        if (showprogressbar) {
++           fprintf(stdout, "Sorting Symbols:     (may take a while... "
++                   "no progress info for this one)" );
++           fflush(stdout);
++        }
+ 	if ((postings = mypopen(sortcommand, "r")) == NULL) {
+ 	    fprintf(stderr, "cscope: cannot open pipe to sort command\n");
+ 	    cannotindex();
+diff -ru cscope-15.9.orig/src/build.h cscope-15.9/src/build.h
+--- cscope-15.9/src/build.h.orig	2022-11-17 05:03:27.039874446 -0800
++++ cscope-15.9/src/build.h	2022-11-17 05:08:40.173327393 -0800
+@@ -45,6 +45,7 @@
+ /* declarations for globals defined in build.c */
+ 
+ extern	BOOL	buildonly;	/* only build the database */
++extern	BOOL	showprogressbar;/* show progress bar (only applic. to -b option) */
+ extern	BOOL	unconditional;	/* unconditionally build database */
+ extern	BOOL	fileschanged;	/* assume some files changed */
+ 
+diff -ru cscope-15.9.orig/src/global.h cscope-15.9/src/global.h
+--- cscope-15.9/src/global.h.orig	2017-11-06 16:14:58.000000000 -0800
++++ cscope-15.9/src/global.h	2022-11-17 05:08:40.173327393 -0800
+@@ -46,6 +46,8 @@
+ #include <stdio.h>	/* standard I/O package */
+ #include <stdlib.h>     /* standard library functions */
+ 
++#define PROG_BAR_WIDTH  18
++
+ /* A special "magic" header file required by HP/Compaq NSK (Non-Stop
+  * Kernel) to present a more Unix-ish environment ... */
+ #ifdef HAVE_FLOSS_H
+diff -ru cscope-15.9.orig/src/invlib.c cscope-15.9/src/invlib.c
+--- cscope-15.9/src/invlib.c.orig	2022-11-17 05:03:27.047874279 -0800
++++ cscope-15.9/src/invlib.c	2022-11-17 05:08:40.173327393 -0800
+@@ -43,6 +43,9 @@
+ #include "invlib.h"
+ #include "global.h"
+ 
++#include "build.h"
++#include "prog_bar.h"
++
+ #include <assert.h>
+ 
+ #define	DEBUG		0	/* debugging code and realloc messages */
+@@ -118,6 +121,10 @@
+ 	int	j;
+ 	unsigned maxtermlen = 0;
+ #endif
++        static prog_bar_t *pb = NULL;
++        uint64_t nlines;
++        int first_pb_update = 1;
++
+ 	/* output file */
+ 	if ((outfile = vpfopen(invname, "w+b")) == NULL) {
+ 		invcannotopen(invname);
+@@ -173,11 +180,38 @@
+ 	numlogblk = 0;
+ 	lastinblk = sizeof(t_logicalblk);
+ 
++        if (showprogressbar) {
++           if (pb) {
++              prog_bar_destroy(pb);
++           }
++           /* start progress bar as "Sorting:"; pls see below */
++           pb = prog_bar_create(npostings, PROG_BAR_WIDTH,
++                                "Sorting Symbols:     ");
++        }
++
++        nlines = 0;
++        first_pb_update = 1;
+ 	/* now loop as long as more to read (till eof)  */
+ 	while (fgets(line, TERMMAX, infile) != NULL) {
+ #if DEBUG || STATS
+ 		++totpost;
+ #endif
++                nlines++;
++		if (pb) {
++                   if (first_pb_update) {
++                      /* we play a trick here; sorting is done externally by
++                       * the 'sort' command, so there's no way for us to show
++                       * progress there; if we got here is b/c the sorting
++                       * has completed, so show a 100% progress bar for
++                       * "Sorting". And then start the indexing part from 0%.
++                       */
++                      first_pb_update = 0;
++                      prog_bar_done(pb);
++                      prog_bar_set_title(pb, "Generating Indexes:  ");
++                      prog_bar_reset(pb);
++                   }
++                   prog_bar_update(pb, nlines, NULL, 0);
++                }
+ 		s = strchr(line, SEP);
+ 		if (s != NULL) {
+ 			*s = '\0';
+@@ -249,6 +283,11 @@
+ 		fflush(stdout);
+ #endif
+ 	}
++        if (pb) {
++           prog_bar_done(pb);
++           prog_bar_destroy(pb);
++           pb = NULL;
++        }
+ 	if (!invnewterm()) {
+ 		return(0);
+ 	}
+diff -ru cscope-15.9.orig/src/main.c cscope-15.9/src/main.c
+--- cscope-15.9/src/main.c.orig	2022-11-17 05:03:27.051874195 -0800
++++ cscope-15.9/src/main.c	2022-11-17 05:08:40.173327393 -0800
+@@ -153,7 +153,7 @@
+ 	
+ 
+ 	while ((opt = getopt_long(argcc, argv,
+-	       "hVbcCdeF:f:I:i:kLl0:1:2:3:4:5:6:7:8:9:P:p:qRs:TUuvX",
++	       "GhVbcCdeF:f:I:i:kLl0:1:2:3:4:5:6:7:8:9:P:p:qRs:TUuvX",
+ 	       lopts, &longind)) != -1) {
+ 		switch(opt) {
+ 
+@@ -200,6 +200,9 @@
+ 		case 'e':	/* suppress ^E prompt between files */
+ 			editallprompt = NO;
+ 			break;
++		case 'G':
++		        showprogressbar = YES;
++			break;
+ 		case 'h':
+ 			longusage();
+ 			myexit(1);
+@@ -370,6 +373,9 @@
+ 	    case 'e':	/* suppress ^E prompt between files */
+ 		editallprompt = NO;
+ 		break;
++	    case 'G':	/* show progress bar (only applicable to -b option) */
++		showprogressbar = YES;
++		break;
+ 	    case 'k':	/* ignore DFLT_INCDIR */
+ 		kernelmode = YES;
+ 		break;
+@@ -481,6 +487,9 @@
+ 
+  lastarg:
+ #endif
++    if (!buildonly) {
++      showprogressbar = NO;
++    }
+     /* read the environment */
+     editor = mygetenv("EDITOR", EDITOR);
+     editor = mygetenv("VIEWER", editor); /* use viewer if set */
+@@ -1004,7 +1013,7 @@
+ static void
+ usage(void)
+ {
+-	fprintf(stderr, "Usage: cscope [-bcCdehklLqRTuUvV] [-f file] [-F file] [-i file] [-I dir] [-s dir]\n");
++	fprintf(stderr, "Usage: cscope [-bcCdeGhklLqRTuUvV] [-f file] [-F file] [-i file] [-I dir] [-s dir]\n");
+ 	fprintf(stderr, "              [-p number] [-P path] [-[0-8] pattern] [source files]\n");
+ }
+ 
+@@ -1022,7 +1031,8 @@
+ -d            Do not update the cross-reference.\n\
+ -e            Suppress the <Ctrl>-e command prompt between files.\n\
+ -F symfile    Read symbol reference lines from symfile.\n\
+--f reffile    Use reffile as cross-ref file name instead of %s.\n",
++-f reffile    Use reffile as cross-ref file name instead of %s.\n\
++-G            Show progress bar (only applicable to -b option)",
+ 		REFFILE);
+ 	fprintf(stderr, "\
+ -h            This help screen.\n\
+diff -ru cscope-15.9.orig/src/Makefile.am cscope-15.9/src/Makefile.am
+--- cscope-15.9/src/Makefile.am.orig	2022-11-17 05:03:27.055874111 -0800
++++ cscope-15.9/src/Makefile.am	2022-11-17 05:08:40.173327393 -0800
+@@ -27,6 +27,8 @@
+ exec.c find.c global.h help.c history.c input.c invlib.c invlib.h library.h \
+ logdir.c lookup.c lookup.h main.c mouse.c mygetenv.c mypopen.c scanner.h    \
+ version.h vp.h vpaccess.c vpfopen.c vpinit.c vpopen.c
++cscope_SOURCES += prog_bar.c
++cscope_SOURCES += prog_bar.h
+ 
+ EXTRA_cscope_SOURCES = scanner.l fscanner.l
+ 
+Only in cscope-15.9/src: prog_bar.c
+Only in cscope-15.9/src: prog_bar.h
+--- /dev/null	2014-05-23 05:20:49.797625918 -0700
++++ cscope-15.9/src/prog_bar.c	2014-06-27 23:36:55.918157737 -0700
+@@ -0,0 +1,155 @@
++#include <stdio.h>
++#include <string.h>
++#include <stdint.h>
++#include <unistd.h>
++#include <malloc.h>
++
++#include "prog_bar.h"
++
++prog_bar_t*
++prog_bar_create(uint64_t total_items, uint32_t width, const char* title) {
++   prog_bar_t *pb = calloc(1, sizeof(prog_bar_t));
++
++   pb->total_items = total_items;
++   pb->width = width;
++   pb->title = title;
++
++   return pb;
++}
++
++void 
++prog_bar_destroy(prog_bar_t *pb) {
++   free(pb);
++}
++
++void
++prog_bar_set_title(prog_bar_t *pb, const char* new_title) {
++   pb->title = new_title;
++}
++
++void
++prog_bar_reset(prog_bar_t *pb) {
++   /* save fields to be preserved */
++   uint64_t total_items = pb->total_items;
++   int width = pb->width;
++   const char* title = pb->title;
++   memset(pb, 0, sizeof(*pb));
++
++   /* and now restore them */
++   pb->total_items = total_items;
++   pb->width = width;
++   pb->title = title;
++}
++
++static void
++fill_str(char *str, char c, uint32_t sz, uint32_t max_sz) {
++   if (sz > max_sz - 1) {
++      sz = max_sz - 1;
++   }
++   memset(str, c, sz);
++   str[sz] = '\0';
++}
++
++
++void
++prog_bar_full_str(char *dst, const char* src, int max_sz) {
++   int src_len = strlen(src);
++   int dst_len = 0;
++   dst[0] = '\0';
++   if (max_sz > 79) {
++      max_sz = 79;
++   }
++   if (dst_len + src_len > max_sz -1) {
++      src_len = max_sz - 1 - dst_len;
++      if (src_len <= 0) {
++         return;
++      }
++   }
++   memcpy(&dst[dst_len], src, src_len);
++   dst_len += src_len;
++   dst[dst_len] = '\0';
++   /* fill rest w/ spaces */
++   fill_str(&dst[dst_len], ' ', 79 - dst_len, max_sz - dst_len);
++}
++
++void
++prog_bar_display(prog_bar_t *pb) {
++   uint32_t done, left, cur_msg_len;
++   char doneStr[100];
++   char notDoneStr[100];
++   char str[400];
++   done = ( pb->items * pb->width ) / pb->total_items;
++   if (done == 0) {
++      done = 1;
++   }
++   fill_str(doneStr, '#', done, sizeof(doneStr));
++   fill_str(notDoneStr, ' ', pb->width - done, sizeof(doneStr));
++
++   sprintf(str, "\r%s[%s%s] %3d%% ", 
++           pb->title, doneStr, notDoneStr, pb->perc_done);
++   if (pb->cur_msg) {
++      left = 79 - strlen(str);
++      cur_msg_len = strlen(pb->cur_msg);
++      if (cur_msg_len > left) {
++         if (left - cur_msg_len >= 3) {
++            strcat(str, "...");
++            left -= 3;
++         }
++         strcat(str, &pb->cur_msg[cur_msg_len - left]);
++      } else {
++         strcat(str, &pb->cur_msg[0]);
++         /* fill rest w/ spaces */
++         fill_str(&str[strlen(str)], ' ', 
++                  left - cur_msg_len,
++                  sizeof(str) - strlen(str));
++      }
++   }
++   fprintf(stdout, "%s\r", str);
++   fflush(stdout);
++}
++
++void
++prog_bar_done(prog_bar_t *pb) {
++   prog_bar_update(pb, pb->total_items, NULL, 1);
++   fprintf(stdout, "\n");
++   fflush(stdout);
++}
++
++void
++prog_bar_update(prog_bar_t *pb, uint64_t items, const char *msg, uint32_t force) {
++   uint32_t perc_done;
++   int msg_len;
++   if (items > pb->total_items) {
++      items = pb->total_items;
++   }
++   pb->items = items;
++   perc_done = ( items * 100 ) / pb->total_items;
++   if (perc_done != pb->perc_done ||
++       (msg && strcmp(msg, pb->cur_msg) != 0) ||
++       force) {
++      pb->perc_done = perc_done;
++      if (msg) {
++         msg_len = strlen(msg);
++         if (msg_len > sizeof(pb->cur_msg)) {
++            msg_len = sizeof(pb->cur_msg) - 1;
++         }
++         memcpy(pb->cur_msg, msg, msg_len);
++         pb->cur_msg[msg_len] = '\0';
++      } else {
++         pb->cur_msg[0] = '\0';
++      }
++      prog_bar_display(pb);
++   }
++}
++
++void
++prog_bar_set_total(prog_bar_t *pb, uint64_t new_total) {
++   if (pb->total_items == new_total) {
++      return;
++   }
++   pb->total_items = new_total;
++   if (pb->items > new_total) {
++      pb->items = new_total;
++   }
++   prog_bar_update(pb, pb->items, NULL, 1);
++}
+--- /dev/null	2014-05-23 05:20:49.797625918 -0700
++++ cscope-15.9/src/prog_bar.h	2014-06-27 23:36:55.918157737 -0700
+@@ -0,0 +1,39 @@
++#ifndef __PROG_BAR_H__
++#define __PROG_BAR_H__
++
++#include <stdint.h>
++
++typedef struct prog_bar_ {
++   uint64_t total_items;
++   uint64_t items;
++   uint32_t width;
++   uint32_t perc_done;
++   const char* title;
++   char cur_msg[300];
++} prog_bar_t;
++
++prog_bar_t*
++prog_bar_create(uint64_t total_items, uint32_t width, const char* title);
++
++void 
++prog_bar_destroy(prog_bar_t *pb);
++
++void
++prog_bar_reset(prog_bar_t *pb);
++
++void
++prog_bar_full_str(char *dst, const char* src, int max_sz);
++
++void
++prog_bar_display(prog_bar_t *pb);
++
++void
++prog_bar_update(prog_bar_t *pb, uint64_t items, const char *msg, uint32_t force);
++
++void
++prog_bar_set_total(prog_bar_t *pb, uint64_t new_total);
++
++void
++prog_bar_done(prog_bar_t *pb);
++
++#endif // __PROG_BAR_H__
